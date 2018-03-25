@@ -3,6 +3,7 @@ import time
 import array
 from timeit import default_timer as timer
 import threading
+from scipy import stats
 
 class MS5611SPI(threading.Thread):
 
@@ -51,9 +52,9 @@ class MS5611SPI(threading.Thread):
         C = self.prom
         while not self.exit.is_set():
             self.converttemperature4096()
-            readTime = time.time()
             time.sleep(1/100.0)
             D2 = self.readadc()
+            readTime = time.time()
             self.convertpressure4096()
             time.sleep(1/100.0)
             D1 = self.readadc()
@@ -82,6 +83,75 @@ class MS5611SPI(threading.Thread):
         self.dataLock.release()
         return values
 
+    def readRaw(self):
+        self.dataLock.acquire()
+        index = self.writeIndex -1
+        if index < 0:
+            index = 499
+        timestamp = self.times[index]
+        pressure = self.values[index]
+        self.dataLock.release()
+        return timestamp, pressure
+
+    def readVarioLinear(self, pressureConst, varioConst):
+        self.dataLock.acquire()
+        # get value window for current pressure
+        index = self.writeIndex
+        currentTime = 0.0
+        currentValues = array.array('d')
+        currentTimes = array.array('d')
+        while True:
+            index -= 1
+            if index < 0:
+                index = 499
+            if self.times[index] == 0.0:
+                break;
+            if currentTime == 0.0:
+                currentTime = self.times[index]
+            if currentTime - self.times[index] > pressureConst:
+                break;
+            currentValues.append(self.values[index])
+            currentTimes.append(self.times[index])
+
+        # find the last value of the compare window
+        while True:
+            index -= 1
+            if index < 0:
+                index = 499
+            if currentTime - self.times[index] > varioConst or self.times[index] == 0.0:
+                break;
+        
+        # copy data of the compareWindow
+        compareValues = array.array('d')
+        compareTimes = array.array('d')
+        lastCompareTime = self.times[index]
+        while True:
+            if lastCompareTime - self.times[index] > pressureConst or self.times[index] == 0.0:
+                break;
+            compareValues.append(self.values[index])
+            compareTimes.append(self.times[index])
+            index -= 1
+            if index < 0:
+                index = 499
+        self.dataLock.release()
+
+        if len(currentTimes) > 1:
+            slope, intercept, r_value, p_value, std_err = stats.linregress(currentTimes, currentValues)
+            currentPressure = slope * currentTime + intercept
+        else:
+            currentPressure = 1013.00
+        if len(compareTimes) > 1:
+            slope, intercept, r_value, p_value, std_err = stats.linregress(compareTimes, compareValues)
+            comparePressure = slope * lastCompareTime + intercept
+        else:
+            comparePressure = currentPressure
+        if currentTime - lastCompareTime > 0.1:
+            vario = (currentPressure - comparePressure) / (currentTime - lastCompareTime) * -8.0
+        else:
+            vario = 0.0
+        return currentPressure, vario
+        
+    
     def readVario(self):
         self.dataLock.acquire()
         # current average
